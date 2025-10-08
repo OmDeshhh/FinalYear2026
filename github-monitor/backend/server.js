@@ -52,17 +52,19 @@ const AlertSchema = new mongoose.Schema({
   slackMessageTs: String
 });
 
+// Simplified Thread Schema matching frontend
 const ThreadSchema = new mongoose.Schema({
-  channel: String,
-  events: [{
-    eventType: { type: String, enum: ['webhook_init', 'update', 'success', 'error', 'retry'] },
-    message: String,
-    timestamp: { type: Date, default: Date.now }
-  }],
-  createdAt: { type: Date, default: Date.now }
+  id: { type: String, required: true, unique: true }, // Slack thread_ts
+  text: { type: String, required: true }, // Original message text
+  createdAt: { type: String, required: true }, // Formatted date string
+  replies: [{
+    id: String, // Reply message ts
+    text: String, // Reply text
+    createdAt: String // Formatted date string
+  }]
 });
 
-// NEW: Slack Configuration Schema
+// Slack Configuration Schema
 const SlackConfigSchema = new mongoose.Schema({
   webhookUrl: { type: String, required: true },
   channel: String,
@@ -82,6 +84,40 @@ function isValidSlackWebhookUrl(url) {
   if (!url.startsWith('https://hooks.slack.com/services/')) return false;
   const pathParts = url.replace('https://hooks.slack.com/services/', '').split('/');
   return pathParts.length >= 3 && pathParts.every(part => part.length > 0);
+}
+
+// Helper function to post message to Slack using Bot Token
+async function postSlackMessage(text, threadTs = null) {
+  const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+  const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
+
+  if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) {
+    throw new Error('SLACK_BOT_TOKEN and SLACK_CHANNEL_ID must be set in environment variables');
+  }
+
+  const fetch = (await import('node-fetch')).default;
+  const payload = {
+    channel: SLACK_CHANNEL_ID,
+    text: text,
+    ...(threadTs && { thread_ts: threadTs })
+  };
+
+  const response = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(data.error || 'Failed to post to Slack');
+  }
+
+  return data; // Returns { ok: true, ts: "1234567890.123456", ... }
 }
 
 // Generate webhook on startup
@@ -193,7 +229,8 @@ app.get('/api/health', (req, res) => {
     uptime: process.uptime(),
     publicUrl: publicUrl || 'Not exposed',
     isLive: !!publicUrl,
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    slackConfigured: !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_CHANNEL_ID)
   });
 });
 
@@ -391,33 +428,36 @@ app.post('/api/slack/test-webhook', async (req, res) => {
   }
 });
 
-// ========== MESSAGE THREADING ENDPOINTS ==========
+// ========== IMPROVED MESSAGE THREADING ENDPOINTS WITH SLACK INTEGRATION ==========
 
-// Create a new thread
+// Create a new thread (posts to Slack and saves to DB)
 app.post('/api/slack/create-thread', async (req, res) => {
   try {
-    const { channel, initialMessage, eventType } = req.body;
+    const { text } = req.body;
     
-    if (!channel || !initialMessage) {
-      return res.status(400).json({ error: 'Channel and initial message are required' });
+    if (!text) {
+      return res.status(400).json({ error: 'Message text is required' });
     }
 
+    // Post message to Slack
+    const slackResponse = await postSlackMessage(text);
+    const threadTs = slackResponse.ts;
+
+    // Save to database with the actual Slack thread_ts
     const thread = await Thread.create({
-      channel: channel,
-      events: [{
-        eventType: eventType || 'webhook_init',
-        message: initialMessage,
-        timestamp: new Date()
-      }],
-      createdAt: new Date()
+      id: threadTs,
+      text,
+      createdAt: new Date().toLocaleString(undefined, { second: '2-digit', hour12: true }),
+      replies: []
     });
 
-    console.log(`✅ Created thread in ${channel}`);
+    console.log(`✅ Created thread in Slack: ${threadTs}`);
 
     res.json({ 
       success: true, 
       thread,
-      message: 'Thread created successfully!'
+      slackTs: threadTs,
+      message: 'Thread created and posted to Slack!'
     });
   } catch (err) {
     console.error('Thread creation error:', err);
@@ -425,36 +465,41 @@ app.post('/api/slack/create-thread', async (req, res) => {
   }
 });
 
-// Add message to existing thread - FIXED: Use MongoDB _id instead of threadId
+// Add reply to existing thread (posts to Slack thread and saves to DB)
 app.post('/api/slack/add-to-thread', async (req, res) => {
   try {
-    const { threadId, message, eventType } = req.body;
+    const { threadId, text } = req.body;
     
-    if (!threadId || !message) {
-      return res.status(400).json({ error: 'Thread ID and message are required' });
+    if (!threadId || !text) {
+      return res.status(400).json({ error: 'Thread ID and text are required' });
     }
 
-    // Use MongoDB _id to find the thread
-    const thread = await Thread.findById(threadId);
+    // Find thread in DB
+    const thread = await Thread.findOne({ id: threadId });
     if (!thread) {
       return res.status(404).json({ error: 'Thread not found' });
     }
 
-    // Add new event to thread
-    thread.events.push({
-      eventType: eventType || 'update',
-      message: message,
-      timestamp: new Date()
+    // Post reply to Slack thread
+    const slackResponse = await postSlackMessage(text, threadId);
+    const replyTs = slackResponse.ts;
+
+    // Add reply to database
+    thread.replies.push({
+      id: replyTs,
+      text: text,
+      createdAt: new Date().toLocaleString(undefined, { second: '2-digit', hour12: true })
     });
 
     await thread.save();
 
-    console.log(`✅ Added message to thread ${threadId}`);
+    console.log(`✅ Added reply to thread ${threadId} in Slack`);
 
     res.json({ 
       success: true,
-      message: 'Message added to thread!',
-      thread
+      thread,
+      slackTs: replyTs,
+      message: 'Reply posted to Slack thread!'
     });
   } catch (err) {
     console.error('Add to thread error:', err);
@@ -473,16 +518,31 @@ app.get('/api/slack/threads', async (req, res) => {
   }
 });
 
-// Get single thread by ID
+// Get single thread by Slack thread_ts
 app.get('/api/slack/threads/:id', async (req, res) => {
   try {
-    const thread = await Thread.findById(req.params.id);
+    const thread = await Thread.findOne({ id: req.params.id });
     if (!thread) {
       return res.status(404).json({ error: 'Thread not found' });
     }
     res.json({ thread });
   } catch (err) {
     console.error('Get thread error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete thread
+app.delete('/api/slack/threads/:id', async (req, res) => {
+  try {
+    const thread = await Thread.findOneAndDelete({ id: req.params.id });
+    if (!thread) {
+      return res.status(404).json({ error: 'Thread not found' });
+    }
+    console.log(`✅ Deleted thread: ${req.params.id}`);
+    res.json({ success: true, message: 'Thread deleted from database (Slack messages remain)' });
+  } catch (err) {
+    console.error('Delete thread error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -599,7 +659,9 @@ app.get('/api/slack/config-status', async (req, res) => {
     
     res.json({
       configured: !!config,
-      lastUpdate: config?.updatedAt || null
+      lastUpdate: config?.updatedAt || null,
+      botTokenConfigured: !!process.env.SLACK_BOT_TOKEN,
+      channelConfigured: !!process.env.SLACK_CHANNEL_ID
     });
   } catch (err) {
     console.error('Get config status error:', err);
@@ -625,6 +687,17 @@ async function startServer() {
   app.listen(PORT, async () => {
     console.log(`🚀 Webhook server running on http://localhost:${PORT}`);
     console.log(`📡 Ready to receive webhooks`);
+    console.log('');
+    
+    // Check Slack configuration
+    if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_CHANNEL_ID) {
+      console.log('✅ Slack Bot Token configured');
+      console.log('✅ Slack Channel ID configured');
+      console.log('🎯 Threading will post to Slack channel:', process.env.SLACK_CHANNEL_ID);
+    } else {
+      console.log('⚠️  SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not configured');
+      console.log('💡 Threading features will not work without these');
+    }
     console.log('');
     
     // Try to create ngrok tunnel automatically

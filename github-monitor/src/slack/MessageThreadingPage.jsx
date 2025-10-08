@@ -6,7 +6,9 @@ import {
   Clock,
   Hash,
   Eye,
-  AlertCircle
+  AlertCircle,
+  Trash2,
+  Send
 } from 'lucide-react';
 
 export default function MessageThreadingPage() {
@@ -16,14 +18,12 @@ export default function MessageThreadingPage() {
   const [showCreateThread, setShowCreateThread] = useState(false);
   const [showAddMessage, setShowAddMessage] = useState(null);
   const [threadData, setThreadData] = useState({
-    channel: '#webhook-events',
-    initialMessage: 'Webhook delivery initiated for order #12345',
-    eventType: 'webhook_init'
+    text: ''
   });
   const [messageData, setMessageData] = useState({
-    message: '',
-    eventType: 'update'
+    text: ''
   });
+  const [isSending, setIsSending] = useState(false);
 
   const BACKEND_URL = 'http://localhost:3001';
 
@@ -48,89 +48,100 @@ export default function MessageThreadingPage() {
   };
 
   const createThread = async () => {
-    if (!threadData.initialMessage.trim()) {
-      alert('Please enter an initial message');
+    if (!threadData.text.trim()) {
+      alert('Please enter a message');
       return;
     }
 
+    setIsSending(true);
     try {
       const res = await fetch(`${BACKEND_URL}/api/slack/create-thread`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(threadData)
+        body: JSON.stringify({ text: threadData.text })
       });
 
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+      }
+      
       const result = await res.json();
 
       if (result.success) {
-        alert('Thread created successfully!');
+        alert(`Thread created successfully in Slack! Thread ID: ${result.slackTs}`);
         fetchThreads();
         setShowCreateThread(false);
-        setThreadData({
-          channel: '#webhook-events',
-          initialMessage: '',
-          eventType: 'webhook_init'
-        });
+        setThreadData({ text: '' });
       } else {
         throw new Error(result.error || 'Failed to create thread');
       }
     } catch (err) {
       console.error('Failed to create thread:', err);
       alert(`Failed to create thread: ${err.message}`);
+    } finally {
+      setIsSending(false);
     }
   };
 
   const addMessageToThread = async (threadId) => {
-    if (!messageData.message.trim()) {
+    if (!messageData.text.trim()) {
       alert('Please enter a message');
       return;
     }
 
+    setIsSending(true);
     try {
       const res = await fetch(`${BACKEND_URL}/api/slack/add-to-thread`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ threadId, ...messageData })
+        body: JSON.stringify({
+          threadId,
+          text: messageData.text
+        })
       });
 
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+      }
+      
       const result = await res.json();
 
       if (result.success) {
-        alert('Message added to thread!');
+        alert(`Reply posted to Slack thread! Reply ID: ${result.slackTs}`);
         fetchThreads();
         setShowAddMessage(null);
-        setMessageData({ message: '', eventType: 'update' });
+        setMessageData({ text: '' });
       } else {
         throw new Error(result.error || 'Failed to add message');
       }
     } catch (err) {
       console.error('Failed to add message:', err);
       alert(`Failed to add message: ${err.message}`);
+    } finally {
+      setIsSending(false);
     }
   };
 
-  const getEventTypeColor = (eventType) => {
-    const colors = {
-      webhook_init: 'bg-blue-500/20 text-blue-400',
-      update: 'bg-yellow-500/20 text-yellow-400',
-      success: 'bg-green-500/20 text-green-400',
-      error: 'bg-red-500/20 text-red-400',
-      retry: 'bg-orange-500/20 text-orange-400'
-    };
-    return colors[eventType] || 'bg-gray-500/20 text-gray-400';
-  };
+  const deleteThread = async (threadId) => {
+    if (!confirm('Are you sure you want to delete this thread from the database? (Slack messages will remain)')) {
+      return;
+    }
 
-  const getEventTypeLabel = (eventType) => {
-    const labels = {
-      webhook_init: 'Init',
-      update: 'Update',
-      success: 'Success',
-      error: 'Error',
-      retry: 'Retry'
-    };
-    return labels[eventType] || eventType;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/slack/threads/${threadId}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      
+      alert('Thread deleted successfully!');
+      fetchThreads();
+    } catch (err) {
+      console.error('Failed to delete thread:', err);
+      alert(`Failed to delete thread: ${err.message}`);
+    }
   };
 
   return (
@@ -139,7 +150,7 @@ export default function MessageThreadingPage() {
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-2">Message Threading</h1>
           <p className="text-gray-400">
-            Manage threaded conversations for related webhook events
+            Create and manage threaded conversations in Slack
           </p>
         </div>
 
@@ -181,9 +192,9 @@ export default function MessageThreadingPage() {
                 </div>
                 <div>
                   <div className="text-2xl font-bold text-green-400">
-                    {threads.reduce((acc, thread) => acc + (thread.events?.length || 0), 0)}
+                    {threads.reduce((acc, thread) => acc + (thread.replies?.length || 0), 0)}
                   </div>
-                  <div className="text-gray-400 text-sm">Total Messages</div>
+                  <div className="text-gray-400 text-sm">Total Replies</div>
                 </div>
               </div>
             </div>
@@ -195,9 +206,9 @@ export default function MessageThreadingPage() {
                 </div>
                 <div>
                   <div className="text-2xl font-bold text-blue-400">
-                    {threads.filter(t => t.events?.some(e => e.eventType === 'success')).length}
+                    {threads.filter(t => t.replies?.length > 0).length}
                   </div>
-                  <div className="text-gray-400 text-sm">Completed</div>
+                  <div className="text-gray-400 text-sm">With Replies</div>
                 </div>
               </div>
             </div>
@@ -216,46 +227,22 @@ export default function MessageThreadingPage() {
         {showCreateThread && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
             <div className="bg-gray-900 rounded-lg p-6 border border-gray-700 max-w-md w-full">
-              <h3 className="text-xl font-bold mb-4">Create New Thread</h3>
+              <h3 className="text-xl font-bold mb-4">Create New Thread in Slack</h3>
+              <p className="text-sm text-gray-400 mb-4">
+                This will post a new message to your Slack channel and create a thread.
+              </p>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm text-gray-400 mb-2">Channel</label>
-                  <input
-                    type="text"
-                    value={threadData.channel}
-                    onChange={(e) =>
-                      setThreadData(prev => ({ ...prev, channel: e.target.value }))
-                    }
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Event Type</label>
-                  <select
-                    value={threadData.eventType}
-                    onChange={(e) =>
-                      setThreadData(prev => ({ ...prev, eventType: e.target.value }))
-                    }
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg"
-                  >
-                    <option value="webhook_init">Webhook Initiated</option>
-                    <option value="update">Update</option>
-                    <option value="success">Success</option>
-                    <option value="error">Error</option>
-                    <option value="retry">Retry</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Initial Message *</label>
+                  <label className="block text-sm text-gray-400 mb-2">Message *</label>
                   <textarea
-                    value={threadData.initialMessage}
+                    value={threadData.text}
+                    placeholder="Enter your message..."
                     onChange={(e) =>
-                      setThreadData(prev => ({ ...prev, initialMessage: e.target.value }))
+                      setThreadData({ text: e.target.value })
                     }
-                    rows="3"
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg"
+                    rows="4"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-purple-500"
+                    disabled={isSending}
                   />
                 </div>
               </div>
@@ -263,14 +250,25 @@ export default function MessageThreadingPage() {
               <div className="flex gap-3 mt-6">
                 <button
                   onClick={createThread}
-                  disabled={!threadData.initialMessage.trim()}
-                  className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 py-2 rounded-lg"
+                  disabled={!threadData.text.trim() || isSending}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:cursor-not-allowed py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
-                  Create Thread
+                  {isSending ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      Posting...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      Post to Slack
+                    </>
+                  )}
                 </button>
                 <button
                   onClick={() => setShowCreateThread(false)}
-                  className="flex-1 bg-gray-700 hover:bg-gray-600 py-2 rounded-lg"
+                  disabled={isSending}
+                  className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 py-2 rounded-lg transition-colors"
                 >
                   Cancel
                 </button>
@@ -283,33 +281,22 @@ export default function MessageThreadingPage() {
         {showAddMessage && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
             <div className="bg-gray-900 rounded-lg p-6 border border-gray-700 max-w-md w-full">
-              <h3 className="text-xl font-bold mb-4">Add Message to Thread</h3>
+              <h3 className="text-xl font-bold mb-4">Reply to Thread in Slack</h3>
+              <p className="text-sm text-gray-400 mb-4">
+                This will post a reply to the existing Slack thread.
+              </p>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm text-gray-400 mb-2">Event Type</label>
-                  <select
-                    value={messageData.eventType}
-                    onChange={(e) =>
-                      setMessageData(prev => ({ ...prev, eventType: e.target.value }))
-                    }
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg"
-                  >
-                    <option value="update">Update</option>
-                    <option value="success">Success</option>
-                    <option value="error">Error</option>
-                    <option value="retry">Retry</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Message *</label>
+                  <label className="block text-sm text-gray-400 mb-2">Reply Message *</label>
                   <textarea
-                    value={messageData.message}
+                    value={messageData.text}
+                    placeholder="Enter your reply..."
                     onChange={(e) =>
-                      setMessageData(prev => ({ ...prev, message: e.target.value }))
+                      setMessageData({ text: e.target.value })
                     }
-                    rows="3"
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg"
+                    rows="4"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-purple-500"
+                    disabled={isSending}
                   />
                 </div>
               </div>
@@ -317,14 +304,25 @@ export default function MessageThreadingPage() {
               <div className="flex gap-3 mt-6">
                 <button
                   onClick={() => addMessageToThread(showAddMessage)}
-                  disabled={!messageData.message.trim()}
-                  className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 py-2 rounded-lg"
+                  disabled={!messageData.text.trim() || isSending}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:cursor-not-allowed py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
-                  Add Message
+                  {isSending ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      Posting...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      Post Reply
+                    </>
+                  )}
                 </button>
                 <button
                   onClick={() => setShowAddMessage(null)}
-                  className="flex-1 bg-gray-700 hover:bg-gray-600 py-2 rounded-lg"
+                  disabled={isSending}
+                  className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 py-2 rounded-lg transition-colors"
                 >
                   Cancel
                 </button>
@@ -343,64 +341,76 @@ export default function MessageThreadingPage() {
             threads.map((thread) => (
               <div
                 key={thread._id}
-                className="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden"
+                className="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden hover:border-gray-700 transition-colors"
               >
                 <div className="p-4 border-b border-gray-800">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-purple-500/20 rounded-lg flex items-center justify-center">
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className="w-10 h-10 bg-purple-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
                         <MessageCircle className="w-5 h-5 text-purple-400" />
                       </div>
-                      <div>
-                        <h3 className="font-semibold">
-                          {thread.events?.[0]?.message || 'Thread Conversation'}
+                      <div className="flex-1 min-w-0">
+                        <h3 className="font-semibold truncate">
+                          {thread.text}
                         </h3>
-                        <div className="flex items-center gap-2 text-sm text-gray-400">
+                        <div className="flex items-center gap-2 text-sm text-gray-400 flex-wrap">
                           <Hash className="w-4 h-4" />
-                          {thread.channel}
+                          <span className="font-mono text-xs truncate">Thread: {thread.id}</span>
                           <span>•</span>
-                          <span>{thread.events?.length || 0} messages</span>
+                          <span>{thread.replies?.length || 0} replies</span>
                           <span>•</span>
-                          <span>
-                            Started {new Date(thread.createdAt).toLocaleDateString()}
-                          </span>
+                          <span>{thread.createdAt}</span>
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <button
-                        onClick={() => setShowAddMessage(thread._id)}
-                        className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                        onClick={() => setShowAddMessage(thread.id)}
+                        className="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm transition-colors"
                       >
-                        Add Message
+                        Reply
                       </button>
-                      <button className="p-2 text-gray-400 hover:text-white">
-                        <Eye className="w-4 h-4" />
+                      <button 
+                        onClick={() => deleteThread(thread.id)}
+                        className="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition-colors"
+                        title="Delete thread from database"
+                      >
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
                 </div>
 
-                <div className="p-4 space-y-3">
-                  {thread.events?.map((event, index) => (
-                    <div key={index} className="flex items-start gap-3">
-                      <div
-                        className={`px-2 py-1 rounded text-xs font-medium ${getEventTypeColor(
-                          event.eventType
-                        )}`}
-                      >
-                        {getEventTypeLabel(event.eventType)}
+                {thread.replies && thread.replies.length > 0 && (
+                  <div className="p-4 space-y-3">
+                    <h4 className="text-sm font-semibold text-gray-400 mb-2">
+                      Replies ({thread.replies.length}):
+                    </h4>
+                    {thread.replies.map((reply, index) => (
+                      <div key={reply.id || index} className="flex items-start gap-3 bg-gray-800/50 p-3 rounded-lg">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-300">{reply.text}</p>
+                          <div className="flex items-center gap-2 mt-1">
+                            <p className="text-xs text-gray-500">
+                              {reply.createdAt}
+                            </p>
+                            <span className="text-gray-600">•</span>
+                            <p className="text-xs text-gray-600 font-mono truncate">
+                              {reply.id}
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex-1">
-                        <p className="text-sm text-gray-300">{event.message}</p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {new Date(event.timestamp).toLocaleString()}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
+
+                {(!thread.replies || thread.replies.length === 0) && (
+                  <div className="p-4 text-center text-gray-500 text-sm">
+                    No replies yet. Click "Reply" to add one.
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -409,11 +419,12 @@ export default function MessageThreadingPage() {
             <div className="text-center py-12">
               <MessageCircle className="w-12 h-12 text-gray-600 mx-auto mb-4" />
               <h3 className="text-lg font-semibold text-gray-400 mb-2">No threads yet</h3>
-              <p className="text-gray-500 mb-4">Create your first threaded conversation</p>
+              <p className="text-gray-500 mb-4">Create your first threaded conversation in Slack</p>
               <button
                 onClick={() => setShowCreateThread(true)}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg"
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors inline-flex items-center gap-2"
               >
+                <Plus className="w-4 h-4" />
                 Create Thread
               </button>
             </div>
