@@ -23,7 +23,7 @@ function App() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Activity className="w-8 h-8 text-green-400" />
-              <h1 className="text-2xl font-bold text-white">GitHub Dashboard</h1>
+              <h1 className="text-2xl font-bold text-white">Slack</h1>
             </div>
 
             <div className="flex gap-3">

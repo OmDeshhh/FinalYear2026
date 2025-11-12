@@ -166,8 +166,42 @@ app.post('/api/webhooks/create', (req, res) => {
 
 app.all('/webhook/:id', async (req, res) => {
   const { id } = req.params;
-
+  
   if (!webhooks.has(id)) {
+    // WEBHOOK NOT FOUND - Create alert and post to Slack
+    try {
+      const alert = await Alert.create({
+        level: 'error',
+        message: `Webhook not found: ${id}`,
+        webhookUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+        timestamp: new Date()
+      });
+
+      // Post to Slack immediately
+      await axios.post(process.env.SLACK_WEBHOOK_URL, {
+        attachments: [{
+          color: '#f44336',
+          title: '🚨 Webhook Delivery Failed',
+          fields: [
+            { title: 'Webhook ID', value: id, short: true },
+            { title: 'Method', value: req.method, short: true },
+            { title: 'Error', value: 'Webhook not found', short: false },
+            { title: 'URL', value: req.originalUrl, short: false },
+            { title: 'Time', value: new Date().toLocaleString(), short: false }
+          ],
+          footer: 'Alert System'
+        }]
+      }).then(response => {
+        alert.slackMessageTs = response.data.ts;
+        alert.save();
+      }).catch(slackErr => {
+        console.error('Failed to post to Slack:', slackErr.message);
+      });
+
+    } catch (err) {
+      console.error('❌ Alert creation error:', err.message);
+    }
+
     return res.status(404).json({ error: 'Webhook not found' });
   }
 
@@ -194,15 +228,48 @@ app.all('/webhook/:id', async (req, res) => {
     await WebhookLog.create({
       webhookId: id,
       method: req.method,
-      status: 'success'
+      status: 'success',
+      timestamp: new Date()
     });
   } catch (err) {
     console.error('❌ MongoDB logging error:', err.message);
+    
+    // CREATE ALERT ON MONGODB FAILURE
+    try {
+      const alert = await Alert.create({
+        level: 'error',
+        message: `MongoDB logging failed: ${err.message}`,
+        webhookUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+        timestamp: new Date()
+      });
+
+      // Post to Slack immediately
+      await axios.post(process.env.SLACK_WEBHOOK_URL, {
+        attachments: [{
+          color: '#ff9800',
+          title: '⚠️ Database Error',
+          fields: [
+            { title: 'Webhook ID', value: id, short: true },
+            { title: 'Error', value: err.message, short: false },
+            { title: 'Time', value: new Date().toLocaleString(), short: false }
+          ],
+          footer: 'Alert System'
+        }]
+      }).then(response => {
+        alert.slackMessageTs = response.data.ts;
+        alert.save();
+      }).catch(slackErr => {
+        console.error('Failed to post to Slack:', slackErr.message);
+      });
+
+    } catch (alertErr) {
+      console.error('❌ Alert creation error:', alertErr.message);
+    }
   }
 
-  res.status(200).json({ 
+  res.status(200).json({
     message: 'Webhook received successfully',
-    webhookId: id 
+    webhookId: id
   });
 });
 
@@ -210,12 +277,22 @@ app.all('/webhook/:id', async (req, res) => {
 app.get('/api/webhooks/:id', (req, res) => {
   try {
     const { id } = req.params;
-    
+   
     if (!webhooks.has(id)) {
       return res.status(404).json({ error: 'Webhook not found' });
     }
-    
+   
     res.json(webhooks.get(id));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get alerts endpoint
+app.get('/api/slack/alerts', async (req, res) => {
+  try {
+    const alerts = await Alert.find().sort({ timestamp: -1 }).limit(50);
+    res.json({ alerts });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
